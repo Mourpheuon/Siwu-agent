@@ -9,6 +9,7 @@
 set -euo pipefail
 
 BRANCH="${1:-main}"
+shift 2>/dev/null || true
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TOKEN_FILE="$PROJECT_ROOT/.github-token"
