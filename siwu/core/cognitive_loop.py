@@ -906,6 +906,25 @@ class CognitiveLoop:
                     queue.put_nowait({"type": "result", "data": None, "error": str(exc)})
                 except Exception:
                     pass
+            except BaseException as be:
+                # CancelledError (SSE disconnect, user stop) — finalize the stuck [...] episode
+                if isinstance(be, KeyboardInterrupt):
+                    raise
+                try:
+                    import uuid as _uuid
+                    sid = _uuid.uuid4().hex[:8]
+                    self.episodic.save_episode(
+                        session_id=sid, question=question,
+                        summary="已终止",
+                        conversation_id=conversation_id,
+                        project_id=project_id,
+                    )
+                except Exception:
+                    pass
+                try:
+                    queue.put_nowait({"type": "result", "data": None, "error": "已终止"})
+                except Exception:
+                    pass
         task = asyncio.create_task(_work())
         while True:
             try:

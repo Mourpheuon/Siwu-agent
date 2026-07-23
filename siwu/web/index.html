@@ -1880,7 +1880,21 @@
         if (!activeConvId) return;
         loadTurns(activeConvId).then(async historyTurns => {
           const lastTurn = historyTurns[historyTurns.length - 1];
+          // [...]-orphan: conversation was stopped / crashed before saving a real summary.
+          // Don't enter recovery — just clean up and show what we have.
           if (!lastTurn || lastTurn.summary !== '[...]') return;
+          if (recoveryTimerRef.current) { clearInterval(recoveryTimerRef.current); recoveryTimerRef.current = null; }
+          if (!runningConvs.has(activeConvId)) {
+            // Backend is no longer running — orphaned [...], remove it
+            console.log('[recovery] orphaned [...] — showing history without it');
+            const clean = historyTurns.filter(t => t.summary !== '[...]');
+            setTurns(clean.map(t => {
+              if (t.summary === '[...]') return null;
+              return { type: 'history', question: t.question, summary: t.summary || '(已终止)', action_items: t.action_items || [], files: [] };
+            }).filter(Boolean));
+            setPhaseLogs([]); setActivePhase(null); setCompletedPhases(new Set());
+            return;
+          }
 
           const historyEntries = historyTurns.slice(0, -1).map(t => ({ type: 'history', question: t.question, summary: t.summary, action_items: t.action_items || [], files: [] }));
           const recoveringConvId = activeConvId;
