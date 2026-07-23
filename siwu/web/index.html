@@ -903,6 +903,20 @@
       const [buildRunning, setBuildRunning] = useState(false);
       const [buildResult, setBuildResult] = useState(null);
       const [releaseVersion, setReleaseVersion] = useState('');
+      const [existingExe, setExistingExe] = useState(null); // {name, size_mb} or null
+
+      // Check for existing .exe when version input changes
+      useEffect(() => {
+        const v = releaseVersion.trim();
+        if (!v) { setExistingExe(null); return; }
+        const timer = setTimeout(() => {
+          fetch('/api/v1/setup/release-check?version=' + encodeURIComponent(v))
+            .then(r => r.json()).then(d => {
+              setExistingExe(d.exists ? d.files[0] : null);
+            }).catch(() => setExistingExe(null));
+        }, 400);
+        return () => clearTimeout(timer);
+      }, [releaseVersion]);
 
       // Auto-fill releaseVersion from versionInfo once it loads
       const releaseVersionSeeded = useRef(false);
@@ -915,13 +929,13 @@
 
       const isElectronShell = typeof window !== 'undefined' && !!(window.siwu);
 
-      const handleBuild = useCallback(async () => {
+      const handleBuild = useCallback(async (skipBuild = false) => {
         setBuildLog([]); setBuildResult(null); setBuildRunning(true);
         try {
           const r = await fetch('/api/v1/setup/build-electron', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ release_version: releaseVersion.trim() }),
+            body: JSON.stringify({ release_version: releaseVersion.trim(), skip_build: skipBuild }),
           });
           const reader = r.body.getReader();
           const decoder = new TextDecoder();
@@ -1452,11 +1466,19 @@
                           <div className="text-[10px] text-warmgray/40 mt-0.5">留空则仅构建不发布 Release。</div>
                         </div>
 
-                        {/* Build button */}
-                        <button onClick={handleBuild} disabled={buildRunning}
-                          className={'w-full py-2 rounded-lg text-white text-sm font-semibold transition-all ' + (buildRunning ? 'bg-dust text-warmgray cursor-wait' : 'bg-seal hover:bg-seal-light')}>
-                          {buildRunning ? <span><span className="build-spinner"></span>构建中…</span> : releaseVersion.trim() ? `🔨 构建并发布 v${releaseVersion.trim()}` : '🔨 构建（不发布）'}
-                        </button>
+                        {/* Build + Release buttons */}
+                        <div className="space-y-2">
+                          {releaseVersion.trim() && existingExe && (
+                            <button onClick={() => handleBuild(true)} disabled={buildRunning}
+                              className={'w-full py-2 rounded-lg text-white text-sm font-semibold transition-all ' + (buildRunning ? 'bg-dust text-warmgray cursor-wait' : 'bg-olive hover:bg-olive/80')}>
+                              {buildRunning ? <span><span className="build-spinner"></span>发布中…</span> : `🚀 仅发布 v${releaseVersion.trim()}（跳过构建）`}
+                            </button>
+                          )}
+                          <button onClick={() => handleBuild(false)} disabled={buildRunning}
+                            className={'w-full py-2 rounded-lg text-white text-sm font-semibold transition-all ' + (buildRunning ? 'bg-dust text-warmgray cursor-wait' : 'bg-seal hover:bg-seal-light')}>
+                            {buildRunning ? <span><span className="build-spinner"></span>构建中…</span> : releaseVersion.trim() ? `🔨 构建并发布 v${releaseVersion.trim()}` : '🔨 构建（不发布）'}
+                          </button>
+                        </div>
 
                         {/* Build result */}
                         {buildResult && (
@@ -1704,6 +1726,8 @@
       const handleSteer = useCallback(async (content) => {
         const cid = activeConvRef.current;
         if (!cid) { console.warn('[steer] no active conversation, ignoring'); return; }
+        // Show steer message in conversation
+        setTurns(prev => [...prev, { type: 'turn', question: content, steer: true, running: false, summary: '', actions: [], files: [] }]);
         try {
           const r = await fetch('/api/v1/agent/control', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2188,7 +2212,8 @@
                     {/* User bubble */}
                     {turn.type !== 'recovering' && (
                     <div className="flex justify-end">
-                      <div className="max-w-[75%] bg-seal text-white rounded-2xl rounded-tr-md px-5 py-3">
+                      <div className={'max-w-[75%] rounded-2xl rounded-tr-md px-5 py-3 ' + (turn.steer ? 'bg-cream border border-clay/20 text-ink' : 'bg-seal text-white')}>
+                        {turn.steer && <div className="text-[10px] text-olive font-semibold uppercase tracking-wide mb-0.5">引导</div>}
                         <div className="text-sm font-medium">{turn.question}</div>
                         {turn.files && turn.files.length > 0 && (
                           <div className="flex flex-wrap gap-1 mt-2">
@@ -2200,7 +2225,7 @@
                           </div>
                         )}
                         {turn.context && <div className="text-[11px] text-white/70 mt-1">{turn.context}</div>}
-                        <div className="text-[10px] text-white/50 mt-1">{turn.mode || 'standard'} 模式</div>
+                        {!turn.steer && <div className="text-[10px] text-white/50 mt-1">{turn.mode || 'standard'} 模式</div>}
                       </div>
                     </div>
                     )}

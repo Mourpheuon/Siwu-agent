@@ -477,7 +477,15 @@ class CognitiveLoop:
                 "exploration_understanding": "探索理解", "creative_design": "创造设计",
             }.get(getattr(preprocessed, "task_nature", ""), "")
             _nature_str = " [" + _nature_display + "]" if _nature_display else ""
-            _skip_info = " (跳" + "、".join(_skips) + ")" if _skips else ""
+            _needs_inv = getattr(preprocessed, "needs_investigation", True)
+            _skip_info = ""
+            if _skips:
+                if not _needs_inv:
+                    _skip_info = " → 无需调查，直接回答"
+                elif len(_skips) >= 4:
+                    _skip_info = " (跳" + "、".join(_skips) + ")"
+                else:
+                    _skip_info = " (跳" + "、".join(_skips) + ")"
             on_phase("preprocessing",
                      "意图：" + (preprocessed.question_intent[:60] or "未识别") +
                      " 领域：" + "、".join(preprocessed.question_domains[:3]) +

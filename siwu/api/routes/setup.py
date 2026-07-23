@@ -572,6 +572,7 @@ def _restore_versions(backup: dict):
 
 class BuildRequest(BaseModel):
     release_version: str = ""  # e.g. "0.0.4". Empty = skip release, just build.
+    skip_build: bool = False   # skip npm build, go straight to release (existing .exe must be present)
 
 
 async def _run_cmd(*args, cwd: str = None, check: bool = False, **kwargs) -> asyncio.subprocess.Process:
@@ -632,9 +633,24 @@ async def _gh_release_create(version: str, dist_dir: Path, *, gh: str) -> str:
             err = (serr or sout).decode("gbk" if sys.platform == "win32" else "utf-8", errors="replace").strip()
             log.warning("gh_release_delete_failed | %s", err[:200])
 
-    # Create release
+    # Create / update tag on remote
+    # Strategy: push tag → create release (avoids interactive prompts)
+    import shutil as _shutil2
+    _git = _shutil2.which("git")
+    if _git:
+        # Delete stale remote tag if it exists (ignore errors)
+        await _run_cmd(_git, "push", "origin", f":refs/tags/{tag}", cwd=cwd,
+                       stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        # Force-update local tag to current HEAD
+        await _run_cmd(_git, "tag", "-f", tag, cwd=cwd,
+                       stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        # Push the tag to remote
+        await _run_cmd(_git, "push", "origin", tag, cwd=cwd,
+                       stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+
     body = f"自动构建发布 {tag}\n\n构建时间：{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    args = [gh, "release", "create", tag, "--title", f"思悟 v{version}", "--notes", body]
+    args = [gh, "release", "create", tag,
+            "--title", f"思悟 v{version}", "--notes", body]
     if version.startswith("0.0"):
         args.append("--prerelease")
     create = await _run_cmd(*args, cwd=cwd,
@@ -665,6 +681,22 @@ async def _gh_release_create(version: str, dist_dir: Path, *, gh: str) -> str:
     return release_url
 
 
+@router.get("/setup/release-check")
+async def release_check(version: str = ""):
+    """Check if a matching .exe already exists for this version."""
+    if not version.strip():
+        return {"exists": False, "files": []}
+    dist_dir = Path.cwd() / "dist-electron"
+    if not dist_dir.exists():
+        return {"exists": False, "files": []}
+    import fnmatch as _fnmatch
+    files = []
+    for p in sorted(dist_dir.iterdir()):
+        if p.is_file() and _fnmatch.fnmatch(p.name, "*.exe") and version.strip() in p.name:
+            files.append({"name": p.name, "size_mb": round(p.stat().st_size / (1024 * 1024), 1)})
+    return {"exists": len(files) > 0, "files": files}
+
+
 @router.post("/setup/build-electron")
 async def build_electron(req: BuildRequest = BuildRequest()):
     """Run electron-builder, stream output via SSE. Optionally auto-publish."""
@@ -672,100 +704,105 @@ async def build_electron(req: BuildRequest = BuildRequest()):
     async def event_generator():
         cwd = Path.cwd()
         release_ver = req.release_version.strip()
+        skip_build = req.skip_build and bool(release_ver)  # only meaningful with a version
         version_backup = None
 
         if release_ver:
             version_backup = _bump_versions(release_ver, cwd)
             yield _sse({"type": "log", "line": f"🔖 已将版本号同步为 {release_ver}"})
 
-        log.info("electron_build_started | cwd=%s", str(cwd))
-
-        # Clean up old build artifacts so only current version remains
         dist_dir = cwd / "dist-electron"
-        if dist_dir.exists():
-            import fnmatch as _fnmatch
-            old_count = 0
-            for f in list(dist_dir.iterdir()):
-                try:
-                    if f.is_file() and (_fnmatch.fnmatch(f.name, "*.exe") or
-                                        _fnmatch.fnmatch(f.name, "*.blockmap") or
-                                        _fnmatch.fnmatch(f.name, "*.yml") or
-                                        _fnmatch.fnmatch(f.name, "*.yaml")):
-                        f.unlink(); old_count += 1
-                except OSError:
-                    pass
-            if old_count:
-                yield _sse({"type": "log", "line": f"🧹 已清理 {old_count} 个旧构建文件"})
 
-        yield _sse({"type": "log", "line": "📦 开始构建 Electron 包壳…"})
-        yield _sse({"type": "log", "line": f"📂 工作目录: {cwd}"})
-        yield _sse({"type": "status", "phase": "building"})
+        if not skip_build:
+            log.info("electron_build_started | cwd=%s", str(cwd))
 
-        try:
-            process = await _run_cmd("npm", "run", "electron:build",
-                                     cwd=str(cwd),
-                                     stdout=asyncio.subprocess.PIPE,
-                                     stderr=asyncio.subprocess.STDOUT)
-        except FileNotFoundError:
-            if version_backup: _restore_versions(version_backup)
-            yield _sse({"type": "error", "message": "未找到 npm 命令，请确认 Node.js 已安装"})
-            yield _sse({"type": "result", "ok": False, "error": "npm 未安装"})
-            return
-        except Exception as e:
-            if version_backup: _restore_versions(version_backup)
-            yield _sse({"type": "error", "message": f"无法启动构建进程: {e}"})
-            yield _sse({"type": "result", "ok": False, "error": str(e)})
-            return
+            # Clean up old build artifacts so only current version remains
+            if dist_dir.exists():
+                import fnmatch as _fnmatch
+                old_count = 0
+                for f in list(dist_dir.iterdir()):
+                    try:
+                        if f.is_file() and (_fnmatch.fnmatch(f.name, "*.exe") or
+                                            _fnmatch.fnmatch(f.name, "*.blockmap") or
+                                            _fnmatch.fnmatch(f.name, "*.yml") or
+                                            _fnmatch.fnmatch(f.name, "*.yaml")):
+                            f.unlink(); old_count += 1
+                    except OSError:
+                        pass
+                if old_count:
+                    yield _sse({"type": "log", "line": f"🧹 已清理 {old_count} 个旧构建文件"})
 
-        # Single loop: read stdout lines with timeout, send heartbeat when idle
-        last_beat = 0
-        yield _sse({"type": "heartbeat", "elapsed": 0})  # immediate beat to confirm stream alive
-        while True:
+            yield _sse({"type": "log", "line": "📦 开始构建 Electron 包壳…"})
+            yield _sse({"type": "log", "line": f"📂 工作目录: {cwd}"})
+            yield _sse({"type": "status", "phase": "building"})
+
             try:
-                raw = await asyncio.wait_for(process.stdout.readline(), timeout=5.0)
-            except asyncio.TimeoutError:
-                last_beat += 5
-                yield _sse({"type": "heartbeat", "elapsed": last_beat})
-                continue
+                process = await _run_cmd("npm", "run", "electron:build",
+                                         cwd=str(cwd),
+                                         stdout=asyncio.subprocess.PIPE,
+                                         stderr=asyncio.subprocess.STDOUT)
+            except FileNotFoundError:
+                if version_backup: _restore_versions(version_backup)
+                yield _sse({"type": "error", "message": "未找到 npm 命令，请确认 Node.js 已安装"})
+                yield _sse({"type": "result", "ok": False, "error": "npm 未安装"})
+                return
+            except Exception as e:
+                if version_backup: _restore_versions(version_backup)
+                yield _sse({"type": "error", "message": f"无法启动构建进程: {e}"})
+                yield _sse({"type": "result", "ok": False, "error": str(e)})
+                return
 
-            if not raw:  # EOF — process stdout closed
-                break
+            # Single loop: read stdout lines with timeout, send heartbeat when idle
+            last_beat = 0
+            yield _sse({"type": "heartbeat", "elapsed": 0})
+            while True:
+                try:
+                    raw = await asyncio.wait_for(process.stdout.readline(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    last_beat += 5
+                    yield _sse({"type": "heartbeat", "elapsed": last_beat})
+                    continue
+                if not raw:
+                    break
+                text = raw.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    yield _sse({"type": "log", "line": text})
 
-            text = raw.decode("utf-8", errors="replace").rstrip()
-            if text:
-                yield _sse({"type": "log", "line": text})
+            await process.wait()
+            returncode = process.returncode
 
-        await process.wait()
-        returncode = process.returncode
+            if version_backup:
+                _restore_versions(version_backup)
+                yield _sse({"type": "log", "line": "🔖 已恢复版本文件"})
 
-        # Restore version files to pre-build state
-        if version_backup:
-            _restore_versions(version_backup)
-            yield _sse({"type": "log", "line": f"🔖 已恢复版本文件"})
+            if returncode != 0:
+                yield _sse({"type": "error", "message": f"构建失败，退出码 {process.returncode}"})
+                yield _sse({"type": "result", "ok": False, "error": f"构建失败 (code={process.returncode})"})
+                return
 
-        if returncode != 0:
-            yield _sse({"type": "error", "message": f"构建失败，退出码 {process.returncode}"})
-            yield _sse({"type": "result", "ok": False, "error": f"构建失败 (code={process.returncode})"})
-            return
+            built_files = sorted(p for p in dist_dir.iterdir() if p.is_file())
+            yield _sse({"type": "log", "line": f"✅ 构建完成！输出 {len(built_files)} 个文件:"})
+            for bf in built_files:
+                size_mb = bf.stat().st_size / (1024 * 1024)
+                yield _sse({"type": "log", "line": f"   {bf.name}  ({size_mb:.1f} MB)"})
+        else:
+            # skip_build: go straight to release
+            yield _sse({"type": "log", "line": f"⏩ 跳过构建，使用已有 {release_ver} 产物"})
 
-        dist_dir = cwd / "dist-electron"
-        if not dist_dir.exists():
-            dist_dir = cwd / "dist"
-        if not dist_dir.exists():
-            yield _sse({"type": "result", "ok": True, "message": "构建完成，但未找到输出目录"})
-            return
-
-        built_files = sorted(p for p in dist_dir.iterdir() if p.is_file())
-        yield _sse({"type": "log", "line": f"✅ 构建完成！输出 {len(built_files)} 个文件:"})
-        for bf in built_files:
-            size_mb = bf.stat().st_size / (1024 * 1024)
-            yield _sse({"type": "log", "line": f"   {bf.name}  ({size_mb:.1f} MB)"})
-
+        # ── Common release path ──
         if release_ver:
+            if skip_build:
+                # dist_dir might have been shadowed by not-skip block; re-resolve
+                dist_dir = cwd / "dist-electron"
+            if not dist_dir.exists():
+                dist_dir = cwd / "dist"
+            if not dist_dir.exists():
+                yield _sse({"type": "result", "ok": True, "message": "未找到输出目录"})
+                return
+
             yield _sse({"type": "log", "line": ""})
             yield _sse({"type": "status", "phase": "releasing"})
 
-            # Resolve gh, auto-install if missing
             gh = _resolve_gh()
             if not gh:
                 if sys.platform == "win32":
@@ -783,7 +820,7 @@ async def build_electron(req: BuildRequest = BuildRequest()):
 
             if not gh:
                 yield _sse({"type": "log", "line": "❌ 自动安装失败，请手动安装 GitHub CLI 后重试"})
-                yield _sse({"type": "result", "ok": True, "message": "构建成功，但 GitHub CLI 未安装", "error": "请运行: winget install GitHub.cli"})
+                yield _sse({"type": "result", "ok": True, "message": "GitHub CLI 未安装", "error": "请运行: winget install GitHub.cli"})
             else:
                 yield _sse({"type": "log", "line": f"🚀 正在创建 GitHub Release v{release_ver}…"})
                 try:
@@ -792,9 +829,11 @@ async def build_electron(req: BuildRequest = BuildRequest()):
                     yield _sse({"type": "result", "ok": True, "release_url": release_url, "version": release_ver})
                 except Exception as e:
                     yield _sse({"type": "log", "line": f"❌ 发布失败: {e}"})
-                    yield _sse({"type": "result", "ok": True, "message": "构建成功，但自动发布失败", "error": str(e)})
-        else:
+                    yield _sse({"type": "result", "ok": True, "message": "自动发布失败", "error": str(e)})
+        elif not skip_build:
             yield _sse({"type": "result", "ok": True, "message": "构建完成"})
+        else:
+            yield _sse({"type": "result", "ok": False, "error": "跳过构建但没有版本号"})
 
     return StreamingResponse(
         event_generator(),

@@ -112,6 +112,8 @@ class PreprocessedQuestion(BaseModel):
     decision_necessity: str = "required"
     practice_necessity: str = "required"
     reflection_necessity: str = "required"
+    # ── 是否需调查：LLM 能否仅凭自身知识直接回答？false → 跳过全部阶段，直接答
+    needs_investigation: bool = True
 
 # --- Investigation ---
 class Fact(BaseModel):

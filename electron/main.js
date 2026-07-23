@@ -12,32 +12,46 @@ const { app, BrowserWindow, dialog } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const http = require('http');
+const net = require('net');
 
 // ── 常量 ──────────────────────────────────────────────────────────
 const HOST = '127.0.0.1';
-const PORT = parseInt(process.env.SIWU_PORT || process.env.PORT || '8000', 10);
 const PYTHON_COMMAND = process.platform === 'win32' ? 'python' : 'python3';
 
 // 项目根目录：electron/ 的父目录
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 
+// ── 端口查找（避免与开发版冲突）────────────────────────────────────
+function findFreePort(startPort) {
+    return new Promise((resolve, reject) => {
+        const server = net.createServer();
+        server.unref();
+        server.on('error', () => resolve(findFreePort(startPort + 1)));
+        server.listen(startPort, HOST, () => {
+            const port = server.address().port;
+            server.close(() => resolve(port));
+        });
+    });
+}
+
 // ── 全局状态 ──────────────────────────────────────────────────────
 let mainWindow = null;
 let pythonProcess = null;
+let actualPort = null;
 
 // ── Python 后端管理 ───────────────────────────────────────────────
 
-function startPythonBackend() {
+function startPythonBackend(port) {
     return new Promise((resolve, reject) => {
         const env = { ...process.env };
-        // 确保 .env 文件中的环境变量被 Python 读取
-        // （python-dotenv 在 siwu/config.py 中加载）
+        // Ensure .env file env vars are read by Python
+        // (python-dotenv loads them in siwu/config.py)
 
         pythonProcess = spawn(PYTHON_COMMAND, [
             '-m', 'uvicorn',
             'siwu.api.server:app',
             '--host', HOST,
-            '--port', String(PORT),
+            '--port', String(port),
         ], {
             cwd: PROJECT_ROOT,
             env,
@@ -63,13 +77,13 @@ function startPythonBackend() {
             process.stderr.write(`[py] ${msg}`);
         });
 
-        // 轮询等待端口就绪
+        // Poll until backend is ready
         const startTime = Date.now();
-        const MAX_WAIT = 30000; // 最多等 30 秒
-        const RETRY_INTERVAL = 300; // 每 300ms 试一次
+        const MAX_WAIT = 30000;
+        const RETRY_INTERVAL = 300;
 
         const checkReady = () => {
-            const req = http.get(`http://${HOST}:${PORT}/api/v1/setup/status`, (res) => {
+            const req = http.get(`http://${HOST}:${port}/api/v1/setup/status`, (res) => {
                 // 任何响应（包括 200/404/500）都说明端口在监听
                 console.log(`[siwu] Python 后端就绪 (${Date.now() - startTime}ms)`);
                 resolve();
@@ -135,18 +149,16 @@ function createWindow() {
             contextIsolation: true,
             nodeIntegration: false,
         },
-        // macOS: 关闭窗口不退出应用
-        ...(process.platform === 'darwin' ? {} : {}),
     });
 
-    // 加载 Python 后端托管的页面
-    mainWindow.loadURL(`http://${HOST}:${PORT}`);
+    // Load the page from our Python backend on its actually-allocated port
+    mainWindow.loadURL(`http://${HOST}:${actualPort}`);
 
     mainWindow.on('closed', () => {
         mainWindow = null;
     });
 
-    // 处理外部链接（在默认浏览器中打开）
+    // Open external links in default browser
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
         if (!url.startsWith(`http://${HOST}`)) {
             require('electron').shell.openExternal(url);
@@ -160,7 +172,9 @@ function createWindow() {
 
 app.whenReady().then(async () => {
     try {
-        await startPythonBackend();
+        actualPort = await findFreePort(8000);
+        console.log(`[siwu] Using port ${actualPort}`);
+        await startPythonBackend(actualPort);
         createWindow();
     } catch (err) {
         console.error('[siwu] 启动失败:', err.message);
