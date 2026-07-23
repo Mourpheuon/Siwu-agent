@@ -904,6 +904,7 @@
       const [buildResult, setBuildResult] = useState(null);
       const [releaseVersion, setReleaseVersion] = useState('');
       const [existingExe, setExistingExe] = useState(null); // {name, size_mb} or null
+      const [suggestedVersion, setSuggestedVersion] = useState('');
 
       // Check for existing .exe when version input changes
       useEffect(() => {
@@ -913,10 +914,19 @@
           fetch('/api/v1/setup/release-check?version=' + encodeURIComponent(v))
             .then(r => r.json()).then(d => {
               setExistingExe(d.exists ? d.files[0] : null);
+              if (d.suggested_version) setSuggestedVersion(d.suggested_version);
             }).catch(() => setExistingExe(null));
         }, 400);
         return () => clearTimeout(timer);
       }, [releaseVersion]);
+
+      // Fetch suggested version on mount (even before version is entered)
+      useEffect(() => {
+        fetch('/api/v1/setup/release-check')
+          .then(r => r.json()).then(d => {
+            if (d.suggested_version) setSuggestedVersion(d.suggested_version);
+          }).catch(() => {});
+      }, []);
 
       // Auto-fill releaseVersion from versionInfo once it loads
       const releaseVersionSeeded = useRef(false);
@@ -1461,7 +1471,7 @@
                         <div>
                           <div className="text-[10px] text-warmgray mb-1">发布版本号</div>
                           <input value={releaseVersion} onChange={e => setReleaseVersion(e.target.value)} onKeyDown={e => handleTabFill(e, releaseVersion, setReleaseVersion)}
-                            placeholder="0.0.4"
+                            placeholder={suggestedVersion || '0.0.1'}
                             className="w-full bg-white border border-linen/60 rounded px-3 py-1.5 text-xs text-ink placeholder:text-clay focus:outline-none focus:border-seal/50" />
                           <div className="text-[10px] text-warmgray/40 mt-0.5">留空则仅构建不发布 Release。</div>
                         </div>

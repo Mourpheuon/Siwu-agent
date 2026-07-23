@@ -684,17 +684,26 @@ async def _gh_release_create(version: str, dist_dir: Path, *, gh: str) -> str:
 @router.get("/setup/release-check")
 async def release_check(version: str = ""):
     """Check if a matching .exe already exists for this version."""
+    current_version = _get_pyproject_version() or _get_package_json_version() or "0.0.1"
+    suggested = current_version
+    try:
+        parts = current_version.split(".")
+        if len(parts) == 3 and all(p.isdigit() for p in parts):
+            suggested = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}"
+    except Exception:
+        pass
+
     if not version.strip():
-        return {"exists": False, "files": []}
+        return {"exists": False, "files": [], "current_version": current_version, "suggested_version": suggested}
     dist_dir = Path.cwd() / "dist-electron"
     if not dist_dir.exists():
-        return {"exists": False, "files": []}
+        return {"exists": False, "files": [], "current_version": current_version, "suggested_version": suggested}
     import fnmatch as _fnmatch
     files = []
     for p in sorted(dist_dir.iterdir()):
         if p.is_file() and _fnmatch.fnmatch(p.name, "*.exe") and version.strip() in p.name:
             files.append({"name": p.name, "size_mb": round(p.stat().st_size / (1024 * 1024), 1)})
-    return {"exists": len(files) > 0, "files": files}
+    return {"exists": len(files) > 0, "files": files, "current_version": current_version, "suggested_version": suggested}
 
 
 @router.post("/setup/build-electron")
@@ -771,10 +780,7 @@ async def build_electron(req: BuildRequest = BuildRequest()):
             await process.wait()
             returncode = process.returncode
 
-            if version_backup:
-                _restore_versions(version_backup)
-                yield _sse({"type": "log", "line": "🔖 已恢复版本文件"})
-
+            # 构建成功：版本号保留为 release_ver（不恢复），与发布产物一致
             if returncode != 0:
                 yield _sse({"type": "error", "message": f"构建失败，退出码 {process.returncode}"})
                 yield _sse({"type": "result", "ok": False, "error": f"构建失败 (code={process.returncode})"})
